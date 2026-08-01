@@ -1,148 +1,201 @@
-from flask_sqlalchemy import SQLAlchemy
+from datetime import datetime, date
 from sqlalchemy_serializer import SerializerMixin
+from sqlalchemy.orm import validates
+from sqlalchemy.ext.hybrid import hybrid_property
+from sqlalchemy.ext.associationproxy import association_proxy
 from werkzeug.security import generate_password_hash, check_password_hash
-from datetime import datetime
 
-db = SQLAlchemy()
+from config import db
 
 
-1. FAN MODEL ( 1: 1 with wristband, 1: Many with ticketbooking)
-
+# ---------------------------------------------------------------------------
+# FAN  (doubles as the auth "User" — role-based: 'fan' | 'admin')
+# ---------------------------------------------------------------------------
 class Fan(db.Model, SerializerMixin):
-    __tablename__ = 'fans'
+    __tablename__ = "fans"
 
-    # Exclude password_hash and reverse relationships to prevent infinite circular JSON loops
-    serialize_rules = ('-password_hash', '-wristband.fan', '-ticket_bookings.fan')
+    # keep nested serialization shallow to avoid recursion:
+    # fan -> wristband (ok), fan -> bookings -> slot (ok), don't go back up
+    serialize_rules = (
+        "-bookings.fan",
+        "-wristband.fan",
+        "-_password_hash",
+    )
 
-    # Primary Key matching handwritten ERD: fan_id
     fan_id = db.Column(db.Integer, primary_key=True)
-    first_name = db.Column(db.String(50), nullable=False)
-    email = db.Column(db.String(120), unique=True, nullable=False, index=True)
-    
-    # Secure Authentication Fields
-    password_hash = db.Column(db.String(256), nullable=False)
-    role = db.Column(db.String(20), nullable=False, default='user')  # 'user' or 'admin'
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    first_name = db.Column(db.String, nullable=False)
+    last_name = db.Column(db.String, nullable=False)
+    email = db.Column(db.String, nullable=False, unique=True)
+    phone = db.Column(db.String)
 
-    # RELATIONSHIP 1: 1:1 Relationship (Fan <-> Wristband)
-    # uselist=False tells SQLAlchemy that a Fan only links to ONE Wristband object
-    # cascade='all, delete-orphan' ensures deleting a Fan removes their issued Wristband
-    wristband = db.relationship('Wristband', backref='fan', uselist=False, cascade='all, delete-orphan')
+    _password_hash = db.Column("password_hash", db.String, nullable=False)
+    role = db.Column(db.String, nullable=False, default="fan")  # 'fan' | 'admin'
 
-    # RELATIONSHIP 2: 1:Many Relationship (Fan -> TicketBooking)
-    # One fan can create multiple ticket bookings over time
-    ticket_bookings = db.relationship('TicketBooking', backref='fan', cascade='all, delete-orphan')
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
 
-    # Helper functions to hash and verify passwords securely
-    def set_password(self, password):
-        self.password_hash = generate_password_hash(password)
+    # 1:1  Fan <-> Wristband
+    wristband = db.relationship(
+        "Wristband",
+        back_populates="fan",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
 
-    def check_password(self, password):
-        return check_password_hash(self.password_hash, password)
+    # many:many  Fan <-> PerformanceSlot  via TicketBooking (association object)
+    bookings = db.relationship(
+        "TicketBooking",
+        back_populates="fan",
+        cascade="all, delete-orphan",
+    )
+    performance_slots = association_proxy("bookings", "performance_slot")
+
+    # --- password handling -------------------------------------------------
+    @hybrid_property
+    def password_hash(self):
+        raise AttributeError("password_hash is not directly readable")
+
+    @password_hash.setter
+    def password_hash(self, password):
+        self._password_hash = generate_password_hash(password)
+
+    def authenticate(self, password):
+        return check_password_hash(self._password_hash, password)
+
+    @validates("email")
+    def validate_email(self, key, email):
+        if "@" not in email:
+            raise ValueError("Invalid email address")
+        return email
+
+    @validates("role")
+    def validate_role(self, key, role):
+        if role not in ("fan", "admin"):
+            raise ValueError("role must be 'fan' or 'admin'")
+        return role
 
     def __repr__(self):
-        return f'<Fan {self.email} (ID: {self.fan_id})>'
+        return f"<Fan {self.fan_id} {self.email} ({self.role})>"
 
-# ========================================================================================================================
 
-2. WRISTBAND MODEL (Access Pass, 1: 1 with fan)
-
+# ---------------------------------------------------------------------------
+# WRISTBAND  (1:1 with Fan)
+# ---------------------------------------------------------------------------
 class Wristband(db.Model, SerializerMixin):
-    __tablename__ = 'wristbands'
+    __tablename__ = "wristbands"
 
-    serialize_rules = ('-fan.wristband',)
+    serialize_rules = ("-fan.wristband",)
 
-    # Primary Key matching handwritten ERD: wristband_id
     wristband_id = db.Column(db.Integer, primary_key=True)
-    
-    # Foreign Key linking to Fan entity
-    # Unique=True enforces the strict 1:1 database constraint!
-    fan_id = db.Column(db.Integer, db.ForeignKey('fans.fan_id'), unique=True, nullable=False)
-    
-    # Chip code matching handwritten ERD: chip_code (RFID tag value)
-    chip_code = db.Column(db.String(64), unique=True, nullable=False)
-    
-    activation_status = db.Column(db.String(20), nullable=False, default='Active')  # 'Active', 'Disabled'
-    issued_at = db.Column(db.DateTime, default=datetime.utcnow)
+    fan_id = db.Column(db.Integer, db.ForeignKey("fans.fan_id"), nullable=False, unique=True)
+    chip_code = db.Column(db.String, nullable=False, unique=True)
+    activation_status = db.Column(db.String, nullable=False, default="inactive")  # inactive | active | lost
+
+    fan = db.relationship("Fan", back_populates="wristband")
+
+    @validates("activation_status")
+    def validate_status(self, key, value):
+        if value not in ("inactive", "active", "lost"):
+            raise ValueError("activation_status must be inactive, active, or lost")
+        return value
 
     def __repr__(self):
-        return f'<Wristband ID:{self.wristband_id} Chip:{self.chip_code}>'
+        return f"<Wristband {self.wristband_id} chip={self.chip_code} status={self.activation_status}>"
 
 
-# ========================================================================================================================
-
-3. STAGE_ZONE MODEL (Festival Stage/Zones, 1:Many with PerformanceSlot)
-
+# ---------------------------------------------------------------------------
+# STAGE ZONE  (1:many -> PerformanceSlot)
+# ---------------------------------------------------------------------------
 class StageZone(db.Model, SerializerMixin):
-    __tablename__ = 'stage_zones'
+    __tablename__ = "stage_zones"
 
-    serialize_rules = ('-performance_slots.stage_zone',)
+    serialize_rules = ("-performance_slots.stage_zone",)
 
-    # Primary Key matching handwritten ERD: zone_id
     zone_id = db.Column(db.Integer, primary_key=True)
-    zone_name = db.Column(db.String(80), nullable=False, unique=True)  # e.g., 'Sahara Tent'
+    zone_name = db.Column(db.String, nullable=False)
     max_capacity = db.Column(db.Integer, nullable=False)
+    vip_access = db.Column(db.Boolean, default=False)
 
-    # RELATIONSHIP 3: 1:M Relationship (StageZone -> PerformanceSlots) 
-    # One stage zone hosts many scheduled performance slots across the festival weekend
-    performance_slots = db.relationship('PerformanceSlot', backref='stage_zone', cascade='all, delete-orphan')
+    # 1:many  StageZone -> PerformanceSlot
+    performance_slots = db.relationship(
+        "PerformanceSlot",
+        back_populates="stage_zone",
+        cascade="all, delete-orphan",
+    )
 
     def __repr__(self):
-        return f'<StageZone {self.zone_name} (Capacity: {self.max_capacity})>'
+        return f"<StageZone {self.zone_id} {self.zone_name} cap={self.max_capacity}>"
 
 
-# ========================================================================================================================
-
-
-4. PERFORMANCE_SLOT MODEL (Artist Scheduled Performance, 1:Many with TicketBooking)
-
+# ---------------------------------------------------------------------------
+# PERFORMANCE SLOT  (belongs to StageZone; many:many with Fan via TicketBooking)
+# ---------------------------------------------------------------------------
 class PerformanceSlot(db.Model, SerializerMixin):
-    __tablename__ = 'performance_slots'
+    __tablename__ = "performance_slots"
 
-    serialize_rules = ('-stage_zone.performance_slots', '-ticket_bookings.performance_slot')
+    serialize_rules = (
+        "-stage_zone.performance_slots",
+        "-bookings.performance_slot",
+    )
 
-    # Primary Key matching handwritten ERD: slot_id
     slot_id = db.Column(db.Integer, primary_key=True)
-    
-    # Foreign Key pointing to the stage zone hosting the performance
-    zone_id = db.Column(db.Integer, db.ForeignKey('stage_zones.zone_id'), nullable=False)
-    
-    # Fields matching handwritten ERD
-    artist_name = db.Column(db.String(100), nullable=False)
-    start_time = db.Column(db.String(10), nullable=False)  # e.g., '20:00'
-    end_time = db.Column(db.String(10), nullable=False)    # e.g., '21:30'
+    artist_name = db.Column(db.String, nullable=False)
+    zone_id = db.Column(db.Integer, db.ForeignKey("stage_zones.zone_id"), nullable=False)
+    performance_date = db.Column(db.Date, nullable=False)
+    start_time = db.Column(db.Time, nullable=False)
+    end_time = db.Column(db.Time, nullable=False)
 
-    # 1:M Relationship -> PerformanceSlot -> TicketBookings
-    ticket_bookings = db.relationship('TicketBooking', backref='performance_slot', cascade='all, delete-orphan')
+    stage_zone = db.relationship("StageZone", back_populates="performance_slots")
+
+    # many:many  PerformanceSlot <-> Fan  via TicketBooking
+    bookings = db.relationship(
+        "TicketBooking",
+        back_populates="performance_slot",
+        cascade="all, delete-orphan",
+    )
+    fans = association_proxy("bookings", "fan")
+
+    @validates("end_time")
+    def validate_time_order(self, key, end_time):
+        if self.start_time and end_time <= self.start_time:
+            raise ValueError("end_time must be after start_time")
+        return end_time
 
     def __repr__(self):
-        return f'<PerformanceSlot {self.artist_name} at Zone ID:{self.zone_id}>'
+        return f"<PerformanceSlot {self.slot_id} {self.artist_name} @ zone {self.zone_id}>"
 
 
-# ========================================================================================================================
-
-
-5. TICKET_BOOKING MODEL (Fan Ticket Booking, Many:1 with Fan and PerformanceSlot)
-
+# ---------------------------------------------------------------------------
+# TICKET BOOKING  (association object: Fan <-> PerformanceSlot)
+# ---------------------------------------------------------------------------
 class TicketBooking(db.Model, SerializerMixin):
-    __tablename__ = 'ticket_bookings'
+    __tablename__ = "ticket_bookings"
 
-    serialize_rules = ('-fan.ticket_bookings', '-performance_slot.ticket_bookings')
+    serialize_rules = (
+        "-fan.bookings",
+        "-performance_slot.bookings",
+    )
 
-    # Primary Key matching handwritten ERD: booking_id
     booking_id = db.Column(db.Integer, primary_key=True)
-    
-    # Foreign Keys connecting the Many:Many pair (Fan <-> PerformanceSlot)
-    fan_id = db.Column(db.Integer, db.ForeignKey('fans.fan_id'), nullable=False)
-    slot_id = db.Column(db.Integer, db.ForeignKey('performance_slots.slot_id'), nullable=False)
-    
-    # --- EXTRA JOIN ATTRIBUTES / PAYLOAD ---
-    # These attributes justify why this is an association object rather than a plain join table!
-    tier_name = db.Column(db.String(30), nullable=False, default='General Admission')  # e.g., 'GA', 'VIP'
-    unit_price = db.Column(db.Float, nullable=False)
-    quantity = db.Column(db.Integer, nullable=False, default=1)
-    booking_status = db.Column(db.String(20), nullable=False, default='Confirmed')  # 'Confirmed', 'Cancelled'
-    booked_at = db.Column(db.DateTime, default=datetime.utcnow)
+    fan_id = db.Column(db.Integer, db.ForeignKey("fans.fan_id"), nullable=False)
+    slot_id = db.Column(db.Integer, db.ForeignKey("performance_slots.slot_id"), nullable=False)
+
+    tier_name = db.Column(db.String, nullable=False)       # e.g. General, VIP, Backstage
+    unit_price = db.Column(db.Numeric(8, 2), nullable=False)
+    booking_status = db.Column(db.String, nullable=False, default="confirmed")  # confirmed | cancelled | waitlisted
+    booked_at = db.Column(db.DateTime, server_default=db.func.now())
+
+    fan = db.relationship("Fan", back_populates="bookings")
+    performance_slot = db.relationship("PerformanceSlot", back_populates="bookings")
+
+    __table_args__ = (
+        db.UniqueConstraint("fan_id", "slot_id", "tier_name", name="uq_fan_slot_tier"),
+    )
+
+    @validates("booking_status")
+    def validate_status(self, key, value):
+        if value not in ("confirmed", "cancelled", "waitlisted"):
+            raise ValueError("booking_status must be confirmed, cancelled, or waitlisted")
+        return value
 
     def __repr__(self):
-        return f'<TicketBooking ID:{self.booking_id} Fan:{self.fan_id} Slot:{self.slot_id}>'
+        return f"<TicketBooking {self.booking_id} fan={self.fan_id} slot={self.slot_id} {self.booking_status}>"
