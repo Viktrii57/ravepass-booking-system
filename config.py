@@ -61,5 +61,11 @@ def create_app():
     api.add_resource(TicketBookingResource, "/bookings/<int:booking_id>")
 
 
-
+    # deep-query endpoints
+    from resources.deep_queries import ZoneRevenueResource, SlotAttendeesResource, FanScheduleResource
+ 
+    api.add_resource(ZoneRevenueResource, "/reports/zone_revenue")
+    api.add_resource(SlotAttendeesResource, "/performance_slots/<int:slot_id>/attendees")
+    api.add_resource(FanScheduleResource, "/fan/schedule")
+ 
     return app
