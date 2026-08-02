@@ -8,9 +8,9 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from config import db
 
 
-# ---------------------------------------------------------------------------
-# FAN  (doubles as the auth "User" — role-based: 'fan' | 'admin')
-# ---------------------------------------------------------------------------
+
+# FAN  (doubles as the auth "User" — role-based: 'fan' or 'admin')
+
 class Fan(db.Model, SerializerMixin):
     __tablename__ = "fans"
 
@@ -49,7 +49,7 @@ class Fan(db.Model, SerializerMixin):
     )
     performance_slots = association_proxy("bookings", "performance_slot")
 
-    # --- password handling -------------------------------------------------
+    # password handling 
     @hybrid_property
     def password_hash(self):
         raise AttributeError("password_hash is not directly readable")
@@ -77,9 +77,9 @@ class Fan(db.Model, SerializerMixin):
         return f"<Fan {self.fan_id} {self.email} ({self.role})>"
 
 
-# ---------------------------------------------------------------------------
+
 # WRISTBAND  (1:1 with Fan)
-# ---------------------------------------------------------------------------
+
 class Wristband(db.Model, SerializerMixin):
     __tablename__ = "wristbands"
 
@@ -102,9 +102,9 @@ class Wristband(db.Model, SerializerMixin):
         return f"<Wristband {self.wristband_id} chip={self.chip_code} status={self.activation_status}>"
 
 
-# ---------------------------------------------------------------------------
+
 # STAGE ZONE  (1:many -> PerformanceSlot)
-# ---------------------------------------------------------------------------
+
 class StageZone(db.Model, SerializerMixin):
     __tablename__ = "stage_zones"
 
@@ -126,9 +126,9 @@ class StageZone(db.Model, SerializerMixin):
         return f"<StageZone {self.zone_id} {self.zone_name} cap={self.max_capacity}>"
 
 
-# ---------------------------------------------------------------------------
-# PERFORMANCE SLOT  (belongs to StageZone; many:many with Fan via TicketBooking)
-# ---------------------------------------------------------------------------
+
+# PERFORMANCE SLOT (belongs to StageZone; many:many with Fan via TicketBooking)
+
 class PerformanceSlot(db.Model, SerializerMixin):
     __tablename__ = "performance_slots"
 
@@ -164,9 +164,9 @@ class PerformanceSlot(db.Model, SerializerMixin):
         return f"<PerformanceSlot {self.slot_id} {self.artist_name} @ zone {self.zone_id}>"
 
 
-# ---------------------------------------------------------------------------
-# TICKET BOOKING  (association object: Fan <-> PerformanceSlot)
-# ---------------------------------------------------------------------------
+
+# TICKET BOOKING (association object: Fan <-> PerformanceSlot)
+
 class TicketBooking(db.Model, SerializerMixin):
     __tablename__ = "ticket_bookings"
 
