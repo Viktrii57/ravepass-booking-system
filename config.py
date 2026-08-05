@@ -38,7 +38,7 @@ def create_app():
     migrate.init_app(app, db)
     bcrypt.init_app(app)
     jwt.init_app(app)
-    CORS(app)
+    CORS(app, origins=[os.environ.get("FRONTEND_URL", "http://localhost:5174")])
 
     api = Api(app)
 
